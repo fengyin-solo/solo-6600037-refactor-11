@@ -1,55 +1,47 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
+import {
+  computeOptics,
+  DEFAULT_PARAMS,
+  EXPERIMENTS,
+  sanitizeParams,
+  type ExperimentId,
+  type OpticsParams,
+  type OpticsResult,
+} from '../optics/physics'
 
 export const useOpticsStore = defineStore('optics', () => {
-  const currentExperiment = ref('double')
-  const params = ref({ wavelength: 550, slitWidth: 50, slitSeparation: 200, screenDistance: 1000 })
+  const currentExperiment = ref<ExperimentId>('double')
+  // 初始状态直接取自共用默认值，并立即经过同一条推导管线。
+  const params = ref<OpticsParams>({ ...DEFAULT_PARAMS })
   const intensityData = ref<number[]>([])
-  const result = ref<{ fringe?: number; centralWidth?: number }>({})
+  const result = ref<OpticsResult>({})
 
-  function setExperiment(id: string) { currentExperiment.value = id; compute() }
-
-  function compute() {
-    const { wavelength: lam, slitWidth: a, slitSeparation: d, screenDistance: L } = params.value
-    const lambda = lam * 1e-9
-    const aM = a * 1e-6
-    const dM = d * 1e-6
-    const LM = L * 1e-3
-    const N = 800
-    const data: number[] = []
-    const xMax = 20e-3
-
-    if (currentExperiment.value === 'double') {
-      result.value.fringe = Math.round(lambda * LM / dM * 1e3 * 100) / 100
-      for (let i = 0; i < N; i++) {
-        const x = (i / N - 0.5) * xMax * 2
-        const delta = Math.PI * dM * x / (lambda * LM)
-        const beta = Math.PI * aM * x / (lambda * LM) || 1e-10
-        const single = Math.sin(beta) / beta
-        const intensity = Math.cos(delta) ** 2 * single ** 2
-        data.push(Math.max(0, intensity))
-      }
-    } else if (currentExperiment.value === 'single') {
-      result.value.centralWidth = Math.round(2 * lambda * LM / aM * 1e3 * 100) / 100
-      for (let i = 0; i < N; i++) {
-        const x = (i / N - 0.5) * xMax * 2
-        const beta = Math.PI * aM * x / (lambda * LM) || 1e-10
-        const intensity = (Math.sin(beta) / beta) ** 2
-        data.push(Math.max(0, intensity))
-      }
-    } else { // newton
-      const R = 1.0
-      for (let i = 0; i < N; i++) {
-        const r = (i / N) * 5e-3
-        const path = r * r / (2 * R)
-        const phi = 2 * Math.PI * path / lambda + Math.PI
-        const intensity = 0.5 * (1 - Math.cos(phi))
-        data.push(Math.max(0, intensity))
-      }
-    }
-
+  // 唯一的更新与重算顺序：写状态 → 共用物理管线 → 刷新光强数据与条纹间距。
+  // 初始载入、参数到边界、频繁拖动、切换实验都经过这里。
+  function recompute() {
+    const { data, result: r } = computeOptics(currentExperiment.value, { ...params.value })
+    // 整体替换，避免上一个实验残留的 fringe / centralWidth 字段。
     intensityData.value = data
+    result.value = r
   }
 
-  return { currentExperiment, params, intensityData, result, setExperiment, compute }
+  // 参数变更：钳制到边界（无效输入回退默认值）后按同一顺序重算。
+  function updateParam(key: keyof OpticsParams, value: unknown) {
+    const next = sanitizeParams({ ...params.value, [key]: value })
+    // 钳制后的值回写，保证滑杆停在边界而不是非法位置。
+    params.value[key] = next[key]
+    recompute()
+  }
+
+  // 切换实验：实验 id 无效时保持现状；有效时沿用同一默认/更新顺序重算。
+  function setExperiment(id: string) {
+    if (!EXPERIMENTS.includes(id as ExperimentId)) return
+    currentExperiment.value = id as ExperimentId
+    recompute()
+  }
+
+  recompute()
+
+  return { currentExperiment, params, intensityData, result, updateParam, setExperiment, recompute }
 })
